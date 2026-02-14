@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geometry Dash JS: Master Edition</title>
+    <style>
+        :root { --blue: #0066ff; --green: #00ff40; }
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        #game-container { position: relative; width: 1280px; height: 640px; border: 4px solid #333; overflow: hidden; background: #000; box-shadow: 0 0 50px rgba(0,0,0,0.8); }
+        canvas { display: block; }
+        
+        /* HUD */
+        #hud { position: absolute; inset: 0; pointer-events: none; display: none; }
+        .hud-top { display: flex; flex-direction: column; align-items: center; padding-top: 15px; }
+        .progress-bar { width: 600px; height: 10px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.3); border-radius: 5px; }
+        #progress-fill { width: 0%; height: 100%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+        #percent-text { color: white; font-weight: bold; font-size: 18px; margin-top: 5px; text-shadow: 2px 2px #000; }
+        #attempt-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 52px; font-weight: 900; opacity: 0; transition: opacity 0.2s; }
+        #mode-display { position: absolute; bottom: 20px; left: 20px; color: white; font-weight: bold; font-size: 20px; text-transform: uppercase; background: rgba(0,0,0,0.5); padding: 5px 15px; border-radius: 5px; border-left: 4px solid var(--blue); }
+
+        /* MENU */
+        #menu { position: absolute; inset: 0; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10; }
+        .title { color: white; font-size: 64px; margin-bottom: 30px; text-shadow: 0 0 20px var(--blue); }
+        .btn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+        .lvl-card { background: #111; border: 2px solid #444; color: white; padding: 20px; width: 180px; text-align: center; cursor: pointer; border-radius: 10px; transition: 0.2s; }
+        .lvl-card:hover { transform: scale(1.05); border-color: var(--green); }
+        #flash { position: absolute; inset: 0; background: white; opacity: 0; pointer-events: none; z-index: 100; }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="gameCanvas" width="1280" height="640"></canvas>
+        <div id="flash"></div>
+        <div id="hud">
+            <div class="hud-top">
+                <div class="progress-bar"><div id="progress-fill"></div></div>
+                <div id="percent-text">0%</div>
+            </div>
+            <div id="attempt-text">ATTEMPT 1</div>
+            <div id="mode-display">CUBE</div>
+        </div>
+        <div id="menu">
+            <h1 class="title">GEOMETRY JS MASTER</h1>
+            <div class="btn-grid" id="level-list"></div>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const SETTINGS = { G: 0.82, JUMP: -12.5, SPEED: 9.2, GROUND: 540, TICK: 1/60 };
+
+    let state = { active: false, cameraX: 0, attempts: 1, objects: [], levelLen: 0, bg: '#0066ff', accumulator: 0, lastTime: 0, levelIdx: 0 };
+    let player = { x: 400, y: 0, w: 38, h: 38, dy: 0, rot: 0, mode: 'CUBE', onGround: false, dead: false, gravDir: 1 };
+    let input = { hold: false };
+
+    const levels = [
+        { name: "Stereo Madness", bg: "#0066ff", diff: "EASY", len: 1.0 },
+        { name: "Back on Track", bg: "#00ccff", diff: "EASY", len: 1.2 },
+        { name: "Polargeist", bg: "#a020f0", diff: "NORMAL", len: 1.4 },
+        { name: "Dry Out", bg: "#ff8c00", diff: "NORMAL", len: 1.6 },
+        { name: "Cycles", bg: "#00008B", diff: "INSANE", len: 2.0 },
+        { name: "Blast Processing", bg: "#222", diff: "DEMON", len: 2.5 }
+    ];
+
+    const list = document.getElementById('level-list');
+    levels.forEach((l, i) => {
+        list.innerHTML += `<div class="lvl-card" onclick="startLevel(${i})"><b>${l.name}</b><br><small>${l.diff}</small></div>`;
+    });
+
+    window.onkeydown = (e) => { 
+        if(e.code === 'Space' || e.code === 'ArrowUp') input.hold = true; 
+        if(e.code === 'Escape') { state.active = false; document.getElementById('menu').style.display = 'flex'; document.getElementById('hud').style.display = 'none'; }
+    };
+    window.onkeyup = (e) => { if(e.code === 'Space' || e.code === 'ArrowUp') input.hold = false; };
+    canvas.onmousedown = () => input.hold = true;
+    canvas.onmouseup = () => input.hold = false;
+
+    function buildLevel(idx) {
+        state.objects = [];
+        let x = 1200;
+        const add = (t, ox, oy, ow=40, oh=40, m=null) => state.objects.push({t, x:ox, y:oy, w:ow, h:oh, m});
+        state.bg = levels[idx].bg;
+        const limit = SETTINGS.SPEED * 60 * 60 * levels[idx].len;
+
+        while (x < limit) {
+            // Portals every ~7 seconds
+            if(x > 5000 && x % 6000 < 500) {
+                const modes = ['SHIP', 'BALL', 'WAVE', 'ROBOT'];
+                add('portal', x, 0, 150, SETTINGS.GROUND, modes[Math.floor(Math.random()*modes.length)]);
+                x += 1000;
+            }
+
+            if(player.mode === 'WAVE') {
+                let gap = 160 + Math.sin(x/500)*80;
+                add('block', x, 0, 80, gap);
+                add('block', x, gap+160, 80, 400);
+                x += 80;
+            } else if(player.mode === 'BALL') {
+                add('block', x, SETTINGS.GROUND-150, 120, 40); // Switches
+                add('spike', x+40, SETTINGS.GROUND-40);
+                x += 400;
+            } else {
+                add('block', x, SETTINGS.GROUND-40, 80, 40);
+                if(Math.random() > 0.4) add('spike', x+150, SETTINGS.GROUND-40);
+                x += 450;
+            }
+        }
+        state.levelLen = x + 2000;
+    }
+
+    function startLevel(idx) {
+        state.levelIdx = idx; state.active = true; state.attempts = 1;
+        document.getElementById('menu').style.display = 'none';
+        document.getElementById('hud').style.display = 'block';
+        buildLevel(idx); resetPlayer(true);
+        state.lastTime = performance.now(); requestAnimationFrame(gameLoop);
+    }
+
+    function resetPlayer(full) {
+        player.y = SETTINGS.GROUND - player.h; player.dy = 0; player.rot = 0;
+        player.mode = (state.levelIdx === 5) ? 'WAVE' : 'CUBE';
+        player.dead = false; state.cameraX = 0; player.gravDir = 1;
+        if(!full) state.attempts++;
+        document.getElementById('mode-display').innerText = player.mode;
+        const att = document.getElementById('attempt-text');
+        att.innerText = "ATTEMPT " + state.attempts; att.style.opacity = 1;
+        setTimeout(() => att.style.opacity = 0, 1500);
+    }
+
+    function updatePhysics() {
+        if(!state.active || player.dead) return;
+        state.cameraX += SETTINGS.SPEED;
+        
+        // Mode Physics
+        if(player.mode === 'CUBE') {
+            player.dy += SETTINGS.G;
+            if(player.onGround && input.hold) { player.dy = SETTINGS.JUMP; player.onGround = false; }
+            if(!player.onGround) player.rot += 6; else player.rot = Math.round(player.rot/90)*90;
+        } else if(player.mode === 'SHIP') {
+            player.dy += input.hold ? -0.5 : 0.4; player.rot = player.dy * 2;
+        } else if(player.mode === 'BALL') {
+            player.dy += 0.8 * player.gravDir;
+            if(player.onGround && input.hold) { player.gravDir *= -1; player.onGround = false; input.hold = false; }
+            player.rot += 5 * player.gravDir;
+        } else if(player.mode === 'WAVE') {
+            player.dy = input.hold ? -9.5 : 9.5; player.rot = (player.dy > 0) ? 25 : -25;
+        } else if(player.mode === 'ROBOT') {
+            player.dy += SETTINGS.G;
+            if(player.onGround && input.hold) { player.dy = -15; player.onGround = false; }
+        }
+
+        player.y += player.dy;
+
+        // Ground/Ceiling
+        if(player.y + player.h >= SETTINGS.GROUND) { player.y = SETTINGS.GROUND - player.h; player.dy = 0; player.onGround = true; }
+        else if(player.y <= 0) { player.y = 0; player.dy = 0; if(player.mode !== 'BALL') crash(); else player.onGround = true; }
+        else player.onGround = false;
+
+        // Perfect Collision Detection
+        const pR = { l: state.cameraX + player.x + 8, r: state.cameraX + player.x + player.w - 8, t: player.y + 8, b: player.y + player.h - 8 };
+        for(let o of state.objects) {
+            if(o.x > pR.r + 200) break;
+            if(pR.r > o.x && pR.l < o.x+o.w && pR.b > o.y && pR.t < o.y+o.h) {
+                if(o.t === 'spike') crash();
+                if(o.t === 'block') {
+                    if(player.y - player.dy + player.h <= o.y + 12) { player.y = o.y - player.h; player.dy = 0; player.onGround = true; }
+                    else if (player.y - player.dy >= o.y + o.h - 12) { player.y = o.y + o.h; player.dy = 0; player.onGround = true; }
+                    else crash();
+                }
+                if(o.t === 'portal') { player.mode = o.m; document.getElementById('mode-display').innerText = player.mode; }
+            }
+        }
+    }
+
+    function crash() { player.dead = true; document.getElementById('flash').style.opacity = 0.8; setTimeout(() => { document.getElementById('flash').style.opacity = 0; resetPlayer(false); }, 450); }
+
+    function draw() {
+        ctx.fillStyle = state.bg; ctx.fillRect(0,0,1280,640);
+        ctx.fillStyle = "#000"; ctx.fillRect(0, SETTINGS.GROUND, 1280, 100);
+        ctx.strokeStyle = "white"; ctx.strokeRect(-1, SETTINGS.GROUND, 1282, 1);
+        ctx.save(); ctx.translate(-state.cameraX, 0);
+        for(let o of state.objects) {
+            if(o.x < state.cameraX - 100 || o.x > state.cameraX + 1300) continue;
+            if(o.t === 'block') { ctx.fillStyle = "#000"; ctx.fillRect(o.x, o.y, o.w, o.h); ctx.strokeStyle = "#fff"; ctx.strokeRect(o.x, o.y, o.w, o.h); }
+            else if(o.t === 'spike') { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(o.x, o.y+o.h); ctx.lineTo(o.x+o.w/2, o.y); ctx.lineTo(o.x+o.w, o.y+o.h); ctx.fill(); }
+            else if(o.t === 'portal') { ctx.fillStyle = "rgba(255,255,255,0.2)"; ctx.fillRect(o.x, 0, o.w, SETTINGS.GROUND); }
+        }
+        if(!player.dead) {
+            ctx.save(); ctx.translate(state.cameraX + player.x + 19, player.y + 19); ctx.rotate(player.rot * Math.PI / 180);
+            ctx.fillStyle = "#0ff"; ctx.fillRect(-19,-19,38,38); ctx.strokeStyle="#fff"; ctx.lineWidth=3; ctx.strokeRect(-19,-19,38,38);
+            ctx.restore();
+        }
+        ctx.restore();
+        let pct = Math.floor((state.cameraX / state.levelLen) * 100);
+        document.getElementById('progress-fill').style.width = pct + "%";
+        document.getElementById('percent-text').innerText = pct + "%";
+    }
+
+    function gameLoop(time) {
+        if(!state.active) return;
+        state.accumulator += (time - state.lastTime) / 1000; state.lastTime = time;
+        while(state.accumulator >= SETTINGS.TICK) { updatePhysics(); state.accumulator -= SETTINGS.TICK; }
+        draw(); requestAnimationFrame(gameLoop);
+    }
+</script>
+</body>
+</html>
